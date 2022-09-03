@@ -15,8 +15,6 @@ import (
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"k8s.io/cli-runtime/pkg/printers"
 	"k8s.io/cli-runtime/pkg/resource"
-	"k8s.io/client-go/dynamic"
-	"k8s.io/client-go/rest"
 	cmdutil "k8s.io/kubectl/pkg/cmd/util"
 	"k8s.io/kubectl/pkg/util/templates"
 
@@ -24,6 +22,7 @@ import (
 	workv1alpha2 "github.com/karmada-io/karmada/pkg/apis/work/v1alpha2"
 	karmadaclientset "github.com/karmada-io/karmada/pkg/generated/clientset/versioned"
 	"github.com/karmada-io/karmada/pkg/karmadactl/options"
+	"github.com/karmada-io/karmada/pkg/karmadactl/util"
 	"github.com/karmada-io/karmada/pkg/resourceinterpreter/defaultinterpreter/prune"
 	"github.com/karmada-io/karmada/pkg/util/gclient"
 	"github.com/karmada-io/karmada/pkg/util/names"
@@ -54,7 +53,7 @@ var (
 )
 
 // NewCmdPromote defines the `promote` command that promote resources from legacy clusters
-func NewCmdPromote(karmadaConfig KarmadaConfig, parentCommand string) *cobra.Command {
+func NewCmdPromote(f util.Factory, parentCommand string) *cobra.Command {
 	opts := CommandPromoteOption{}
 	opts.JSONYamlPrintFlags = genericclioptions.NewJSONYamlPrintFlags()
 
@@ -71,15 +70,18 @@ func NewCmdPromote(karmadaConfig KarmadaConfig, parentCommand string) *cobra.Com
 			if err := opts.Validate(); err != nil {
 				return err
 			}
-			if err := RunPromote(karmadaConfig, opts, args); err != nil {
+			if err := RunPromote(f, opts, args); err != nil {
 				return err
 			}
 			return nil
 		},
 	}
 
-	flag := cmd.Flags()
-	opts.AddFlags(flag)
+	flags := cmd.Flags()
+	opts.AddFlags(flags)
+	flags.StringVar(defaultConfigFlags.KubeConfig, "kubeconfig", *defaultConfigFlags.KubeConfig, "Path to the kubeconfig file to use for CLI requests.")
+	flags.StringVar(defaultConfigFlags.Context, "karmada-context", *defaultConfigFlags.Context, "The name of the kubeconfig context to use")
+	flags.StringVarP(defaultConfigFlags.Namespace, "namespace", "n", *defaultConfigFlags.Namespace, "If present, the namespace scope for this CLI request")
 
 	return cmd
 }
@@ -116,11 +118,7 @@ type CommandPromoteOption struct {
 
 // AddFlags adds flags to the specified FlagSet.
 func (o *CommandPromoteOption) AddFlags(flags *pflag.FlagSet) {
-	o.GlobalCommandOptions.AddFlags(flags)
-
 	flags.StringVarP(&o.OutputFormat, "output", "o", "", "Output format. One of: json|yaml")
-
-	flags.StringVarP(&o.Namespace, "namespace", "n", "default", "-n=namespace or -n namespace")
 	flags.StringVarP(&o.Cluster, "cluster", "C", "", "the name of legacy cluster (eg -C=member1)")
 	flags.StringVar(&o.ClusterContext, "cluster-context", "",
 		"Context name of legacy cluster in kubeconfig. Only works when there are multiple contexts in the kubeconfig.")
@@ -176,38 +174,26 @@ func (o *CommandPromoteOption) Validate() error {
 }
 
 // RunPromote promote resources from legacy clusters
-func RunPromote(karmadaConfig KarmadaConfig, opts CommandPromoteOption, args []string) error {
-	// Get control plane karmada-apiserver client
-	controlPlaneRestConfig, err := karmadaConfig.GetRestConfig(opts.KarmadaContext, opts.KubeConfig)
-	if err != nil {
-		return fmt.Errorf("failed to get control plane rest config. context: %s, kubeconfig: %s, error: %v",
-			opts.KarmadaContext, opts.KubeConfig, err)
-	}
-
-	clusterInfos := make(map[string]*ClusterInfo)
-
-	if err := getClusterInKarmada(controlPlaneRestConfig, clusterInfos); err != nil {
-		return fmt.Errorf("failed to get cluster info in karmada control plane. err: %v", err)
-	}
-
-	if _, exist := clusterInfos[opts.Cluster]; !exist {
-		return fmt.Errorf("cluster(%s) does't exist in karmada control plane", opts.Cluster)
-	}
-
-	var f cmdutil.Factory
+func RunPromote(f util.Factory, opts CommandPromoteOption, args []string) error {
+	var (
+		memberFactory cmdutil.Factory
+		err           error
+	)
 
 	if opts.ClusterKubeConfig != "" {
 		kubeConfigFlags := genericclioptions.NewConfigFlags(true).WithDeprecatedPasswordFlag()
 		kubeConfigFlags.KubeConfig = &opts.ClusterKubeConfig
 		kubeConfigFlags.Context = &opts.ClusterContext
 
-		f = cmdutil.NewFactory(kubeConfigFlags)
+		memberFactory = cmdutil.NewFactory(kubeConfigFlags)
 	} else {
-		opts.setClusterProxyInfo(controlPlaneRestConfig, opts.Cluster, clusterInfos)
-		f = getFactory(opts.Cluster, clusterInfos, "")
+		memberFactory, err = f.FactoryForMemberCluster(opts.Cluster)
+		if err != nil {
+			return err
+		}
 	}
 
-	objInfo, err := opts.getObjInfo(f, opts.Cluster, args)
+	objInfo, err := opts.getObjInfo(memberFactory, opts.Cluster, args)
 	if err != nil {
 		return fmt.Errorf("failed to get resource in cluster(%s). err: %v", opts.Cluster, err)
 	}
@@ -216,7 +202,7 @@ func RunPromote(karmadaConfig KarmadaConfig, opts CommandPromoteOption, args []s
 
 	opts.gvk = obj.GetObjectKind().GroupVersionKind()
 
-	mapper, err := restmapper.MapperProvider(controlPlaneRestConfig)
+	mapper, err := f.ToRESTMapper()
 	if err != nil {
 		return fmt.Errorf("failed to create restmapper: %v", err)
 	}
@@ -226,10 +212,10 @@ func RunPromote(karmadaConfig KarmadaConfig, opts CommandPromoteOption, args []s
 		return fmt.Errorf("failed to get gvr from %q: %v", opts.gvk, err)
 	}
 
-	return promote(controlPlaneRestConfig, obj, gvr, opts)
+	return promote(f, obj, gvr, opts)
 }
 
-func promote(controlPlaneRestConfig *rest.Config, obj *unstructured.Unstructured, gvr schema.GroupVersionResource, opts CommandPromoteOption) error {
+func promote(f util.Factory, obj *unstructured.Unstructured, gvr schema.GroupVersionResource, opts CommandPromoteOption) error {
 	if err := preprocessResource(obj); err != nil {
 		return fmt.Errorf("failed to preprocess resource %q(%s/%s) in control plane: %v", gvr, opts.Namespace, opts.name, err)
 	}
@@ -245,9 +231,15 @@ func promote(controlPlaneRestConfig *rest.Config, obj *unstructured.Unstructured
 		return nil
 	}
 
-	controlPlaneDynamicClient := dynamic.NewForConfigOrDie(controlPlaneRestConfig)
+	controlPlaneDynamicClient, err := f.DynamicClient()
+	if err != nil {
+		return err
+	}
 
-	karmadaClient := karmadaclientset.NewForConfigOrDie(controlPlaneRestConfig)
+	karmadaClient, err := f.KarmadaClientSet()
+	if err != nil {
+		return err
+	}
 
 	if len(obj.GetNamespace()) == 0 {
 		_, err := controlPlaneDynamicClient.Resource(gvr).Get(context.TODO(), opts.name, metav1.GetOptions{})
@@ -333,21 +325,6 @@ func (o *CommandPromoteOption) getObjInfo(f cmdutil.Factory, cluster string, arg
 	return obj, nil
 }
 
-// setClusterProxyInfo set proxy information of cluster
-func (o *CommandPromoteOption) setClusterProxyInfo(karmadaRestConfig *rest.Config, name string, clusterInfos map[string]*ClusterInfo) {
-	clusterInfos[name].APIEndpoint = karmadaRestConfig.Host + fmt.Sprintf(proxyURL, name)
-	clusterInfos[name].KubeConfig = o.KubeConfig
-	clusterInfos[name].Context = o.KarmadaContext
-	if clusterInfos[name].KubeConfig == "" {
-		env := os.Getenv("KUBECONFIG")
-		if env != "" {
-			clusterInfos[name].KubeConfig = env
-		} else {
-			clusterInfos[name].KubeConfig = defaultKubeConfig
-		}
-	}
-}
-
 // printObjectAndPolicy print the converted resource
 func printObjectAndPolicy(obj *unstructured.Unstructured, gvr schema.GroupVersionResource, opts CommandPromoteOption) error {
 	printer, err := opts.Printer(nil, nil, false, false)
@@ -399,7 +376,7 @@ func addOverwriteAnnotation(obj *unstructured.Unstructured) {
 }
 
 // createOrUpdatePropagationPolicy create PropagationPolicy in karmada control plane
-func createOrUpdatePropagationPolicy(karmadaClient *karmadaclientset.Clientset, gvr schema.GroupVersionResource, opts CommandPromoteOption) error {
+func createOrUpdatePropagationPolicy(karmadaClient karmadaclientset.Interface, gvr schema.GroupVersionResource, opts CommandPromoteOption) error {
 	name := names.GeneratePolicyName(opts.Namespace, opts.name, opts.gvk.String())
 
 	_, err := karmadaClient.PolicyV1alpha1().PropagationPolicies(opts.Namespace).Get(context.TODO(), name, metav1.GetOptions{})
@@ -418,7 +395,7 @@ func createOrUpdatePropagationPolicy(karmadaClient *karmadaclientset.Clientset, 
 }
 
 // createOrUpdateClusterPropagationPolicy create ClusterPropagationPolicy in karmada control plane
-func createOrUpdateClusterPropagationPolicy(karmadaClient *karmadaclientset.Clientset, gvr schema.GroupVersionResource, opts CommandPromoteOption) error {
+func createOrUpdateClusterPropagationPolicy(karmadaClient karmadaclientset.Interface, gvr schema.GroupVersionResource, opts CommandPromoteOption) error {
 	name := names.GeneratePolicyName("", opts.name, opts.gvk.String())
 
 	_, err := karmadaClient.PolicyV1alpha1().ClusterPropagationPolicies().Get(context.TODO(), name, metav1.GetOptions{})

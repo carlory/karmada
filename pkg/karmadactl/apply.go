@@ -12,14 +12,13 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"k8s.io/cli-runtime/pkg/resource"
-	restclient "k8s.io/client-go/rest"
 	kubectlapply "k8s.io/kubectl/pkg/cmd/apply"
-	cmdutil "k8s.io/kubectl/pkg/cmd/util"
 	"k8s.io/kubectl/pkg/util/templates"
 
 	policyv1alpha1 "github.com/karmada-io/karmada/pkg/apis/policy/v1alpha1"
 	karmadaclientset "github.com/karmada-io/karmada/pkg/generated/clientset/versioned"
 	"github.com/karmada-io/karmada/pkg/karmadactl/options"
+	"github.com/karmada-io/karmada/pkg/karmadactl/util"
 	"github.com/karmada-io/karmada/pkg/util/names"
 )
 
@@ -68,9 +67,9 @@ var (
 )
 
 // NewCmdApply creates the `apply` command
-func NewCmdApply(karmadaConfig KarmadaConfig, parentCommand string, streams genericclioptions.IOStreams) *cobra.Command {
+func NewCmdApply(f util.Factory, parentCommand string, streams genericclioptions.IOStreams) *cobra.Command {
 	o := &CommandApplyOptions{
-		KubectlApplyFlags: kubectlapply.NewApplyFlags(nil, streams),
+		KubectlApplyFlags: kubectlapply.NewApplyFlags(f, streams),
 	}
 	cmd := &cobra.Command{
 		Use:     "apply (-f FILENAME | -k DIRECTORY)",
@@ -78,7 +77,7 @@ func NewCmdApply(karmadaConfig KarmadaConfig, parentCommand string, streams gene
 		Long:    applyLong,
 		Example: fmt.Sprintf(applyExample, parentCommand),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := o.Complete(karmadaConfig, cmd, parentCommand, args); err != nil {
+			if err := o.Complete(f, cmd, parentCommand, args); err != nil {
 				return err
 			}
 			if err := o.Validate(cmd, args); err != nil {
@@ -88,30 +87,24 @@ func NewCmdApply(karmadaConfig KarmadaConfig, parentCommand string, streams gene
 		},
 	}
 
+	flags := cmd.Flags()
+
 	o.GlobalCommandOptions.AddFlags(cmd.Flags())
-	o.KubectlApplyFlags.AddFlags(cmd)
-	cmd.Flags().StringVarP(&o.Namespace, "namespace", "n", o.Namespace, "If present, the namespace scope for this CLI request")
-	cmd.Flags().BoolVarP(&o.AllClusters, "all-clusters", "", o.AllClusters, "If present, propagates a group of resources to all member clusters.")
-	cmd.Flags().StringSliceVarP(&o.Clusters, "cluster", "C", o.Clusters, "If present, propagates a group of resources to specified clusters.")
+	flags.StringVar(defaultConfigFlags.KubeConfig, "kubeconfig", *defaultConfigFlags.KubeConfig, "Path to the kubeconfig file to use for CLI requests.")
+	flags.StringVar(defaultConfigFlags.Context, "karmada-context", *defaultConfigFlags.Context, "The name of the kubeconfig context to use")
+	flags.StringVarP(defaultConfigFlags.Namespace, "namespace", "n", *defaultConfigFlags.Namespace, "If present, the namespace scope for this CLI request")
+	flags.BoolVarP(&o.AllClusters, "all-clusters", "", o.AllClusters, "If present, propagates a group of resources to all member clusters.")
+	flags.StringSliceVarP(&o.Clusters, "cluster", "C", o.Clusters, "If present, propagates a group of resources to specified clusters.")
 	return cmd
 }
 
 // Complete completes all the required options
-func (o *CommandApplyOptions) Complete(karmadaConfig KarmadaConfig, cmd *cobra.Command, parentCommand string, args []string) error {
-	restConfig, err := karmadaConfig.GetRestConfig(o.KarmadaContext, o.KubeConfig)
-	if err != nil {
-		return err
-	}
-	karmadaClient, err := karmadaclientset.NewForConfig(restConfig)
+func (o *CommandApplyOptions) Complete(f util.Factory, cmd *cobra.Command, parentCommand string, args []string) error {
+	karmadaClient, err := f.KarmadaClientSet()
 	if err != nil {
 		return err
 	}
 	o.karmadaClient = karmadaClient
-
-	kubeConfigFlags := NewConfigFlags(true).WithDeprecatedPasswordFlag()
-	kubeConfigFlags.Namespace = &o.Namespace
-	kubeConfigFlags.WrapConfigFn = func(config *restclient.Config) *restclient.Config { return restConfig }
-	o.KubectlApplyFlags.Factory = cmdutil.NewFactory(kubeConfigFlags)
 	kubectlApplyOptions, err := o.KubectlApplyFlags.ToOptions(cmd, parentCommand, args)
 	if err != nil {
 		return err

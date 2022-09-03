@@ -32,12 +32,11 @@ import (
 	"k8s.io/kubectl/pkg/util/interrupt"
 	"k8s.io/kubectl/pkg/util/templates"
 	utilpointer "k8s.io/utils/pointer"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	clusterv1alpha1 "github.com/karmada-io/karmada/pkg/apis/cluster/v1alpha1"
 	workv1alpha2 "github.com/karmada-io/karmada/pkg/apis/work/v1alpha2"
 	karmadaclientset "github.com/karmada-io/karmada/pkg/generated/clientset/versioned"
-	"github.com/karmada-io/karmada/pkg/karmadactl/options"
+	"github.com/karmada-io/karmada/pkg/karmadactl/util"
 	"github.com/karmada-io/karmada/pkg/util/gclient"
 	"github.com/karmada-io/karmada/pkg/util/helper"
 	"github.com/karmada-io/karmada/pkg/util/names"
@@ -84,7 +83,7 @@ var (
 )
 
 // NewCmdGet New get command
-func NewCmdGet(karmadaConfig KarmadaConfig, parentCommand string, streams genericclioptions.IOStreams) *cobra.Command {
+func NewCmdGet(f util.Factory, parentCommand string, streams genericclioptions.IOStreams) *cobra.Command {
 	o := NewCommandGetOptions(streams)
 	cmd := &cobra.Command{
 		Use:          "get [NAME | -l label | -n namespace]  [flags]",
@@ -92,39 +91,38 @@ func NewCmdGet(karmadaConfig KarmadaConfig, parentCommand string, streams generi
 		SilenceUsage: true,
 		Example:      fmt.Sprintf(getExample, parentCommand),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := o.Complete(karmadaConfig); err != nil {
+			if err := o.Complete(); err != nil {
 				return err
 			}
 			if err := o.Validate(cmd); err != nil {
 				return err
 			}
-			if err := o.Run(karmadaConfig, cmd, args); err != nil {
+			if err := o.Run(f, cmd, args); err != nil {
 				return err
 			}
 			return nil
 		},
 	}
 
-	o.GlobalCommandOptions.AddFlags(cmd.Flags())
-	o.PrintFlags.AddFlags(cmd)
+	flags := cmd.Flags()
 
-	cmd.Flags().StringVarP(&o.Namespace, "namespace", "n", o.Namespace, "-n=namespace or -n namespace")
-	cmd.Flags().StringVarP(&o.LabelSelector, "labels", "l", "", "-l=label or -l label")
-	cmd.Flags().StringSliceVarP(&o.Clusters, "clusters", "C", []string{}, "-C=member1,member2")
-	cmd.Flags().BoolVarP(&o.AllNamespaces, "all-namespaces", "A", o.AllNamespaces, "If present, list the requested object(s) across all namespaces. Namespace in current context is ignored even if specified with --namespace.")
-	cmd.Flags().BoolVar(&o.IgnoreNotFound, "ignore-not-found", o.IgnoreNotFound, "If the requested object does not exist the command will return exit code 0.")
-	cmd.Flags().BoolVarP(&o.Watch, "watch", "w", o.Watch, "After listing/getting the requested object, watch for changes. Uninitialized objects are excluded if no object name is provided.")
-	cmd.Flags().BoolVar(&o.WatchOnly, "watch-only", o.WatchOnly, "Watch for changes to the requested object(s), without listing/getting first.")
-	cmd.Flags().BoolVar(&o.OutputWatchEvents, "output-watch-events", o.OutputWatchEvents, "Output watch event objects when --watch or --watch-only is used. Existing objects are output as initial ADDED events.")
+	o.PrintFlags.AddFlags(cmd)
+	flags.StringVar(defaultConfigFlags.KubeConfig, "kubeconfig", *defaultConfigFlags.KubeConfig, "Path to the kubeconfig file to use for CLI requests.")
+	flags.StringVar(defaultConfigFlags.Context, "karmada-context", *defaultConfigFlags.Context, "The name of the kubeconfig context to use")
+	flags.StringVarP(defaultConfigFlags.Namespace, "namespace", "n", *defaultConfigFlags.Namespace, "If present, the namespace scope for this CLI request")
+	flags.StringVarP(&o.LabelSelector, "labels", "l", "", "-l=label or -l label")
+	flags.StringSliceVarP(&o.Clusters, "clusters", "C", []string{}, "-C=member1,member2")
+	flags.BoolVarP(&o.AllNamespaces, "all-namespaces", "A", o.AllNamespaces, "If present, list the requested object(s) across all namespaces. Namespace in current context is ignored even if specified with --namespace.")
+	flags.BoolVar(&o.IgnoreNotFound, "ignore-not-found", o.IgnoreNotFound, "If the requested object does not exist the command will return exit code 0.")
+	flags.BoolVarP(&o.Watch, "watch", "w", o.Watch, "After listing/getting the requested object, watch for changes. Uninitialized objects are excluded if no object name is provided.")
+	flags.BoolVar(&o.WatchOnly, "watch-only", o.WatchOnly, "Watch for changes to the requested object(s), without listing/getting first.")
+	flags.BoolVar(&o.OutputWatchEvents, "output-watch-events", o.OutputWatchEvents, "Output watch event objects when --watch or --watch-only is used. Existing objects are output as initial ADDED events.")
 
 	return cmd
 }
 
 // CommandGetOptions contains the input to the get command.
 type CommandGetOptions struct {
-	// global flags
-	options.GlobalCommandOptions
-
 	Clusters []string
 
 	PrintFlags             *get.PrintFlags
@@ -168,16 +166,8 @@ func NewCommandGetOptions(streams genericclioptions.IOStreams) *CommandGetOption
 }
 
 // Complete takes the command arguments and infers any remaining options.
-func (g *CommandGetOptions) Complete(karmadaConfig KarmadaConfig) error {
+func (g *CommandGetOptions) Complete() error {
 	newScheme := gclient.NewSchema()
-
-	if g.Namespace == "" {
-		namespace, _, err := karmadaConfig.GetClientConfig(g.KarmadaContext, g.KubeConfig).Namespace()
-		if err != nil {
-			return err
-		}
-		g.Namespace = namespace
-	}
 
 	templateArg := ""
 	if g.PrintFlags.TemplateFlags != nil && g.PrintFlags.TemplateFlags.TemplateArgument != nil {
@@ -260,7 +250,7 @@ type OtherPrint struct {
 }
 
 // Run performs the get operation.
-func (g *CommandGetOptions) Run(karmadaConfig KarmadaConfig, cmd *cobra.Command, args []string) error {
+func (g *CommandGetOptions) Run(f util.Factory, cmd *cobra.Command, args []string) error {
 	mux := sync.Mutex{}
 	var wg sync.WaitGroup
 
@@ -280,19 +270,22 @@ func (g *CommandGetOptions) Run(karmadaConfig KarmadaConfig, cmd *cobra.Command,
 	clusterInfos := make(map[string]*ClusterInfo)
 	RBInfo = make(map[string]*OtherPrint)
 
-	karmadaRestConfig, err := clusterInfoInit(g, karmadaConfig, clusterInfos)
+	karmadaClientSet, err := f.KarmadaClientSet()
 	if err != nil {
+		return err
+	}
+
+	if err := clusterInfoInit(g, karmadaClientSet, clusterInfos); err != nil {
 		return err
 	}
 
 	wg.Add(len(g.Clusters))
 	for idx := range g.Clusters {
-		err = g.setClusterProxyInfo(karmadaRestConfig, g.Clusters[idx], clusterInfos)
+		memberFactory, err := f.FactoryForMemberCluster(g.Clusters[idx])
 		if err != nil {
 			return err
 		}
-		f := getFactory(g.Clusters[idx], clusterInfos, "")
-		go g.getObjInfo(&wg, &mux, f, g.Clusters[idx], &objs, &watchObjs, &allErrs, args)
+		go g.getObjInfo(&wg, &mux, memberFactory, g.Clusters[idx], &objs, &watchObjs, &allErrs, args)
 	}
 	wg.Wait()
 
@@ -862,19 +855,13 @@ type ClusterInfo struct {
 	ClusterSyncMode clusterv1alpha1.ClusterSyncMode
 }
 
-func clusterInfoInit(g *CommandGetOptions, karmadaConfig KarmadaConfig, clusterInfos map[string]*ClusterInfo) (*rest.Config, error) {
-	karmadaRestConfig, err := karmadaConfig.GetRestConfig(g.KarmadaContext, g.KubeConfig)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get control plane rest config. context: %s, kube-config: %s, error: %v",
-			g.KarmadaContext, g.KubeConfig, err)
+func clusterInfoInit(g *CommandGetOptions, karmadaClientSet karmadaclientset.Interface, clusterInfos map[string]*ClusterInfo) error {
+	if err := getClusterInKarmada(karmadaClientSet, clusterInfos); err != nil {
+		return fmt.Errorf("method getClusterInKarmada get cluster info in karmada failed, err is: %w", err)
 	}
 
-	if err := getClusterInKarmada(karmadaRestConfig, clusterInfos); err != nil {
-		return nil, fmt.Errorf("method getClusterInKarmada get cluster info in karmada failed, err is: %w", err)
-	}
-
-	if err := g.getRBInKarmada(g.Namespace, karmadaRestConfig); err != nil {
-		return nil, err
+	if err := g.getRBInKarmada(g.Namespace, karmadaClientSet); err != nil {
+		return err
 	}
 
 	if len(g.Clusters) <= 0 {
@@ -882,25 +869,7 @@ func clusterInfoInit(g *CommandGetOptions, karmadaConfig KarmadaConfig, clusterI
 			g.Clusters = append(g.Clusters, c)
 		}
 	}
-	return karmadaRestConfig, nil
-}
-
-func getFactory(clusterName string, clusterInfos map[string]*ClusterInfo, namespace string) cmdutil.Factory {
-	kubeConfigFlags := NewConfigFlags(true).WithDeprecatedPasswordFlag()
-	// Build member cluster kubeConfigFlags
-	kubeConfigFlags.APIServer = stringptr(clusterInfos[clusterName].APIEndpoint)
-
-	// Use kubeconfig to access member cluster
-	kubeConfigFlags.KubeConfig = stringptr(clusterInfos[clusterName].KubeConfig)
-	kubeConfigFlags.Context = stringptr(clusterInfos[clusterName].Context)
-	kubeConfigFlags.usePersistentConfig = true
-
-	if namespace != "" {
-		kubeConfigFlags.Namespace = stringptr(namespace)
-	}
-
-	matchVersionKubeConfigFlags := cmdutil.NewMatchVersionFlags(kubeConfigFlags)
-	return cmdutil.NewFactory(matchVersionKubeConfigFlags)
+	return nil
 }
 
 func (g *CommandGetOptions) transformRequests(req *rest.Request) {
@@ -915,27 +884,25 @@ func (g *CommandGetOptions) transformRequests(req *rest.Request) {
 	}, ","))
 }
 
-func (g *CommandGetOptions) getRBInKarmada(namespace string, config *rest.Config) error {
-	rbList := &workv1alpha2.ResourceBindingList{}
-	crbList := &workv1alpha2.ClusterResourceBindingList{}
+func (g *CommandGetOptions) getRBInKarmada(namespace string, karmadaClientSet karmadaclientset.Interface) error {
 
-	gClient, err := gclient.NewForConfig(config)
-	if err != nil {
-		return err
-	}
+	var (
+		rbList  *workv1alpha2.ResourceBindingList
+		crbList *workv1alpha2.ClusterResourceBindingList
+		err     error
+	)
 
 	if !g.AllNamespaces {
-		err = gClient.List(context.TODO(), rbList, &client.ListOptions{
-			Namespace: namespace,
-		})
+		rbList, err = karmadaClientSet.WorkV1alpha2().ResourceBindings(namespace).List(context.TODO(), metav1.ListOptions{})
 	} else {
-		err = gClient.List(context.TODO(), rbList, &client.ListOptions{})
+		rbList, err = karmadaClientSet.WorkV1alpha2().ResourceBindings(metav1.NamespaceAll).List(context.TODO(), metav1.ListOptions{})
 	}
 	if err != nil {
 		return err
 	}
 
-	if err = gClient.List(context.TODO(), crbList, &client.ListOptions{}); err != nil {
+	crbList, err = karmadaClientSet.WorkV1alpha2().ClusterResourceBindings().List(context.TODO(), metav1.ListOptions{})
+	if err != nil {
 		return err
 	}
 
@@ -966,38 +933,10 @@ func (g *CommandGetOptions) getRBInKarmada(namespace string, config *rest.Config
 	return nil
 }
 
-// setClusterProxyInfo set proxy information of cluster
-func (g *CommandGetOptions) setClusterProxyInfo(karmadaRestConfig *rest.Config, name string, clusterInfos map[string]*ClusterInfo) error {
-	clusterClient := karmadaclientset.NewForConfigOrDie(karmadaRestConfig).ClusterV1alpha1().Clusters()
-
-	// check if the cluster exists in the Karmada control plane
-	_, err := clusterClient.Get(context.TODO(), name, metav1.GetOptions{})
-	if err != nil {
-		return err
-	}
-
-	clusterInfos[name].APIEndpoint = karmadaRestConfig.Host + fmt.Sprintf(proxyURL, name)
-	clusterInfos[name].KubeConfig = g.KubeConfig
-	clusterInfos[name].Context = g.KarmadaContext
-	if clusterInfos[name].KubeConfig == "" {
-		env := os.Getenv("KUBECONFIG")
-		if env != "" {
-			clusterInfos[name].KubeConfig = env
-		} else {
-			clusterInfos[name].KubeConfig = defaultKubeConfig
-		}
-	}
-	return nil
-}
-
 // getClusterInKarmada get cluster info in karmada cluster
-func getClusterInKarmada(client *rest.Config, clusterInfos map[string]*ClusterInfo) error {
-	clusterList := &clusterv1alpha1.ClusterList{}
-	gClient, err := gclient.NewForConfig(client)
+func getClusterInKarmada(karmadaClientSet karmadaclientset.Interface, clusterInfos map[string]*ClusterInfo) error {
+	clusterList, err := karmadaClientSet.ClusterV1alpha1().Clusters().List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
-		return err
-	}
-	if err = gClient.List(context.TODO(), clusterList); err != nil {
 		return err
 	}
 

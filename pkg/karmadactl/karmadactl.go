@@ -61,7 +61,7 @@ func NewKarmadaCtlCommand(cmdUse, parentCommand string) *cobra.Command {
 		{
 			Message: "Basic Commands:",
 			Commands: []*cobra.Command{
-				NewCmdGet(karmadaConfig, parentCommand, ioStreams),
+				NewCmdGet(f, parentCommand, ioStreams),
 			},
 		},
 		{
@@ -79,24 +79,24 @@ func NewKarmadaCtlCommand(cmdUse, parentCommand string) *cobra.Command {
 		{
 			Message: "Cluster Management Commands:",
 			Commands: []*cobra.Command{
-				NewCmdCordon(karmadaConfig, parentCommand),
-				NewCmdUncordon(karmadaConfig, parentCommand),
-				NewCmdTaint(karmadaConfig, parentCommand),
+				NewCmdCordon(f, parentCommand),
+				NewCmdUncordon(f, parentCommand),
+				NewCmdTaint(f, parentCommand),
 			},
 		},
 		{
 			Message: "Troubleshooting and Debugging Commands:",
 			Commands: []*cobra.Command{
 				NewCmdLogs(f, parentCommand, ioStreams),
-				NewCmdExec(karmadaConfig, parentCommand, ioStreams),
-				NewCmdDescribe(karmadaConfig, parentCommand, ioStreams),
+				NewCmdExec(f, parentCommand, ioStreams),
+				NewCmdDescribe(f, parentCommand, ioStreams),
 			},
 		},
 		{
 			Message: "Advanced Commands:",
 			Commands: []*cobra.Command{
-				NewCmdApply(karmadaConfig, parentCommand, ioStreams),
-				NewCmdPromote(karmadaConfig, parentCommand),
+				NewCmdApply(f, parentCommand, ioStreams),
+				NewCmdPromote(f, parentCommand),
 			},
 		},
 	}
